@@ -1,0 +1,14 @@
+# Output products list for <cs_control>
+_xmsgs\pn_parser.xmsgs
+cs_control.asy
+cs_control.ejp
+cs_control.gise
+cs_control.ngc
+cs_control.sym
+cs_control.v
+cs_control.veo
+cs_control.xco
+cs_control.xise
+cs_control_flist.txt
+cs_control_readme.txt
+cs_control_xmdf.tcl

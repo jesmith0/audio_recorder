@@ -1,0 +1,869 @@
+                     ;================================================================
+                     ; Port address definitions...
+                     ;================================================================
+                     CONSTANT ram_com_PORT, 00           ; RAM command port (bit[3] == ff, bit[2] = ram active, bit[1] = delete, bit[0] = read(1)/write(0))
+                     CONSTANT ram_start_addr_PORT1, 01   ; RAM address to start read/write
+                     CONSTANT ram_start_addr_PORT2, 06   ; 26 bits requires 4 ports
+                     CONSTANT ram_start_addr_PORT3, 07   ;
+                     CONSTANT ram_start_addr_PORT4, 08   ;
+                     CONSTANT ram_stop_addr_PORT1, 02    ; RAM address to stop read/write
+                     CONSTANT ram_stop_addr_PORT2, 09    ;
+                     CONSTANT ram_stop_addr_PORT3, 0A    ;
+                     CONSTANT ram_stop_addr_PORT4, 0B    ;
+                     CONSTANT lcd_com_PORT, 03           ; LCD command port (bit[2:0] = en, rw, rs)
+                     CONSTANT lcd_data_PORT, 04          ; LCD data port
+                     CONSTANT volume_PORT, 05            ; volume control
+                     CONSTANT write_stop_addr_PORT1, 0C  ; stop addr after write/pause
+                     CONSTANT write_stop_addr_PORT2, 0D  ;
+                     CONSTANT write_stop_addr_PORT3, 0E  ;
+                     CONSTANT write_stop_addr_PORT4, 0F  ;
+                     CONSTANT test_PORT, FF              ; used for testing
+                     NAMEREG s3, cur_sel_REG
+                     NAMEREG s4, scratch_start_REG
+                     NAMEREG s5, scratch_stop_REG
+                     NAMEREG s6, paused_REG
+                     NAMEREG s7, mem_full_REG
+                     NAMEREG s8, rec_num_REG
+                     NAMEREG s9, volume_REG
+                     NAMEREG sA, int_c_REG
+                     NAMEREG sB, ram_c_REG
+                     NAMEREG sC, lcd_c_REG
+                     NAMEREG sD, lcd_d_REG
+                     NAMEREG sE, char_REG
+                     NAMEREG sF, state_REG
+                     ;================================================================
+                     ; Actual assembly program goes here...
+                     ;
+                     ; NOTE: size limit is 4096 lines of actual assembly code
+                     ;       Old documentation says it is 1024. This is now incorrect.
+                     ;================================================================
+                     ADDRESS 000
+                     DISABLE INTERRUPT
+                     LOAD state_REG, 04                  ; initial state PLAY
+                     LOAD volume_REG, 0C                 ; volume initially at
+                     LOAD scratch_stop_REG, 04           ; init stop loc, start is already 00
+                     CALL set_ram_inactive
+       wait_for_int: ENABLE INTERRUPT                    ; wait for first button press
+                     COMPARE int_c_REG, 01               ; left button
+                     JUMP Z, left_b
+                     COMPARE int_c_REG, 02               ; right button
+                     JUMP Z, right_b
+                     COMPARE int_c_REG, 03               ; center button
+                     JUMP Z, center_b
+                     COMPARE int_c_REG, 04               ; up button
+                     JUMP Z, up_b
+                     COMPARE int_c_REG, 05               ; down button
+                     JUMP Z, down_b
+                     COMPARE int_c_REG, 06               ; memory full
+                     JUMP Z, mem_full
+                     COMPARE int_c_REG, 07               ; ram op done
+                     JUMP Z, ram_op_done
+                     JUMP wait_for_int
+               menu: DISABLE INTERRUPT
+                     COMPARE state_REG, 06               ; print "PLAY message list"
+                     JUMP Z, print_messages
+                     COMPARE state_REG, 05               ; print "DELETE message list"
+                     JUMP Z, print_messages
+                     COMPARE state_REG, 04               ; print "PLAY"
+                     JUMP Z, print_play
+                     COMPARE state_REG, 03               ; print "RECORD"
+                     JUMP Z, print_record
+                     COMPARE state_REG, 02               ; print "DELETE"
+                     JUMP Z, print_del
+                     COMPARE state_REG, 01               ; print "DELETE ALL"
+                     JUMP Z, print_del_all
+                     COMPARE state_REG, 00               ; print "VOLUME"
+                     JUMP Z, print_volume
+                     JUMP wait_for_int                   ; endlessly loop
+             left_b: DISABLE INTERRUPT
+                     LOAD int_c_REG, 00                  ; unload interrupt
+                     COMPARE state_REG, 00               ; volume control
+                     JUMP Z, dec_vol
+                     COMPARE state_REG, 05               ; previous message
+                     CALL Z, dec_scratch_pointer
+                     COMPARE state_REG, 06               ; previous message
+                     CALL Z, dec_scratch_pointer
+                     JUMP menu
+            right_b: DISABLE INTERRUPT
+                     LOAD int_c_REG, 00                  ; unload interrupt
+                     COMPARE state_REG, 00               ; volume control
+                     JUMP Z, inc_vol
+                     COMPARE state_REG, 05               ; previous message
+                     CALL Z, inc_scratch_pointer
+                     COMPARE state_REG, 06               ; previous message
+                     CALL Z, inc_scratch_pointer
+                     JUMP menu
+           center_b: DISABLE INTERRUPT
+                     LOAD int_c_REG, 00                  ; unload
+                     COMPARE state_REG, 01               ; delete all
+                     JUMP Z, del_all
+                     COMPARE state_REG, 02
+                     JUMP Z, del_msgs
+                     COMPARE state_REG, 03               ; record
+                     JUMP Z, record
+                     COMPARE state_REG, 04               ; play
+                     JUMP Z, play_msgs
+                     COMPARE state_REG, 06
+                     JUMP Z, play
+                     JUMP menu
+          play_msgs: DISABLE INTERRUPT
+                     LOAD state_REG, 06                  ; change state to play messages
+                     JUMP menu
+           del_msgs: DISABLE INTERRUPT
+                     LOAD state_REG, 05                  ; change state to del messages
+                     JUMP menu
+               up_b: DISABLE INTERRUPT                   ; scroll menu up
+                     LOAD int_c_REG, 00                  ; unload interrupt
+                     COMPARE state_REG, 04               ; no action if at top
+                     JUMP Z, menu
+                     JUMP inc_state
+             down_b: DISABLE INTERRUPT                   ; scroll menu down
+                     LOAD int_c_REG, 00                  ; unload interrupt
+                     COMPARE state_REG, 05
+                     JUMP Z, ret_menu
+                     COMPARE state_REG, 06
+                     JUMP Z, ret_menu
+                     COMPARE state_REG, 00               ; no action if at bottom
+                     JUMP Z, menu
+                     JUMP dec_state
+            del_all: DISABLE INTERRUPT
+                     LOAD s0, 00                         ; load first ram addr
+                     OUTPUT s0, ram_start_addr_PORT1
+                     OUTPUT s0, ram_start_addr_PORT2
+                     OUTPUT s0, ram_start_addr_PORT3
+                     OUTPUT s0, ram_start_addr_PORT4
+                     LOAD s0, E0                         ; load 1FFFFFE0 as stop addr
+                     OUTPUT s0, ram_stop_addr_PORT1      ; avoids triggering mem_full
+                     LOAD s0, FF
+                     OUTPUT s0, ram_stop_addr_PORT2
+                     OUTPUT s0, ram_stop_addr_PORT3
+                     LOAD s0, 1F
+                     OUTPUT s0, ram_stop_addr_PORT4
+                     CALL prep_ram                       ; reset initials, latch addr
+                     CALL output_del_all_com
+                     LOAD mem_full_REG, 00               ; reset mem_full register
+                     LOAD rec_num_REG, 00                ; reset number of recordings
+                     LOAD s0, 00
+                     CALL clear_scratchpad
+                     LOAD scratch_start_REG, 00          ; reset scratch pad pointers
+                     LOAD scratch_stop_REG, 04
+                     LOAD s0, 00                         ; LOAD first RAM addr in free addr pointer
+                     STORE s0, 3D                        ; other addr are ALWAYS written to before they're read
+                     STORE s0, 3E
+                     STORE s0, 3F
+                     STORE s0, 40
+                     JUMP deleting
+           deleting: ENABLE INTERRUPT
+                     CALL print_deleting
+                     COMPARE int_c_REG, 07               ; wait for op done int
+                     CALL Z, res_latch_ram
+                     JUMP Z, ram_op_done                 ; print done
+                     JUMP deleting
+            inc_vol: COMPARE volume_REG, 18              ; if max volume, no action
+                     JUMP Z, wait_for_int
+                     ADD volume_REG, 02                  ; increment vol
+                     CALL output_vol                     ; output vol
+                     JUMP print_volume                   ; print vol
+            dec_vol: COMPARE volume_REG, 00              ; if min volume, no action
+                     JUMP Z, wait_for_int
+                     SUB volume_REG, 02                  ; decrement vol
+                     CALL output_vol                     ; output vol
+                     JUMP print_volume                   ; print vol
+           ret_menu: DISABLE INTERRUPT
+                     COMPARE state_REG, 06
+                     JUMP Z, load_play_state
+                     COMPARE state_REG, 05
+                     JUMP Z, load_del_state
+                     JUMP menu
+    load_play_state: DISABLE INTERRUPT
+                     LOAD state_REG, 04
+                     JUMP menu
+     load_del_state: DISABLE INTERRUPT
+                     LOAD state_REG, 02
+                     JUMP menu
+inc_scratch_pointer: DISABLE INTERRUPT
+                     COMPARE rec_num_REG, 00             ; don't increment if only 1 recording
+                     RETURN Z
+                     LOAD s0, rec_num_REG                ; load regs to calculate max pointer
+                     LOAD s1, 00
+                     CALL calc_max_pointer
+                     COMPARE scratch_start_REG, s1       ; must be less than MAX addr
+                     RETURN Z
+                     ADD scratch_start_REG, 08
+                     ADD scratch_stop_REG, 08
+                     OUTPUT scratch_start_REG, test_PORT ; display REG loc on LEDs
+                     RETURN                              ; update menu
+dec_scratch_pointer: DISABLE INTERRUPT
+                     COMPARE scratch_start_REG, 00       ; must be greater than MIN addr, 0
+                     RETURN Z
+                     SUB scratch_start_REG, 08
+                     SUB scratch_stop_REG, 08
+                     OUTPUT scratch_start_REG, test_PORT ; display REG loc on LEDs
+                     RETURN                              ; update menu
+   calc_max_pointer: DISABLE INTERRUPT
+                     SUB s0, 01
+                     ADD s1, 08
+                     COMPARE s0, 00
+                     JUMP NZ, calc_max_pointer
+                     SUB s1, 08
+                     RETURN 
+   clear_scratchpad: DISABLE INTERRUPT
+                     COMPARE s0, 40
+                     RETURN Z
+                     STORE s0, 00
+                     ADD s0, 01
+                     JUMP clear_scratchpad
+         output_vol: DISABLE INTERRUPT
+                     OUTPUT volume_REG, volume_PORT
+                     RETURN 
+               play: DISABLE INTERRUPT
+                     COMPARE paused_REG, 01              ; check if paused
+                     JUMP Z, unpause
+                     COMPARE ram_c_REG, 01               ; already playing
+                     JUMP Z, pause
+                     COMPARE ram_c_REG, 10               ; or fast forwarding
+                     JUMP Z, pause
+                     COMPARE rec_num_REG, 01             ; only play if recording exists
+                     JUMP C, menu
+                     COMPARE ram_c_REG, 80               ; otherwise continue only if ram INACTIVE
+                     JUMP NZ, wait_for_int
+                     FETCH s0, (scratch_start_REG)
+                     OUTPUT s0, ram_start_addr_PORT1     ; playback starts at 00
+                     ADD scratch_start_REG, 01
+                     FETCH s0, (scratch_start_REG)
+                     OUTPUT s0, ram_start_addr_PORT2
+                     ADD scratch_start_REG, 01
+                     FETCH s0, (scratch_start_REG)
+                     OUTPUT s0, ram_start_addr_PORT3
+                     ADD scratch_start_REG, 01
+                     FETCH s0, (scratch_start_REG)
+                     OUTPUT s0, ram_start_addr_PORT4
+                     SUB scratch_start_REG, 03
+                     FETCH s0, (scratch_stop_REG)        ; set stop addr
+                     OUTPUT s0, ram_stop_addr_PORT1
+                     ADD scratch_stop_REG, 01
+                     FETCH s0, (scratch_stop_REG)
+                     OUTPUT s0, ram_stop_addr_PORT2
+                     ADD scratch_stop_REG, 01
+                     FETCH s0, (scratch_stop_REG)
+                     OUTPUT s0, ram_stop_addr_PORT3
+                     ADD scratch_stop_REG, 01
+                     FETCH s0, (scratch_stop_REG)
+                     OUTPUT s0, ram_stop_addr_PORT4
+                     SUB scratch_stop_REG, 03
+                     CALL prep_ram                       ; reset initials, latch addr
+                     CALL output_play_com
+                     JUMP menu                           ; update menu
+            unpause: DISABLE INTERRUPT
+                     FETCH s0, 39                        ; FIXED pause addr location
+                     OUTPUT s0, ram_start_addr_PORT1
+                     FETCH s0, 3A
+                     OUTPUT s0, ram_start_addr_PORT2
+                     FETCH s0, 3B
+                     OUTPUT s0, ram_start_addr_PORT3
+                     FETCH s0, 3C
+                     OUTPUT s0, ram_start_addr_PORT4
+                     FETCH s0, (scratch_stop_REG)        ; set stop addr
+                     OUTPUT s0, ram_stop_addr_PORT1
+                     ADD scratch_stop_REG, 01
+                     FETCH s0, (scratch_stop_REG)
+                     OUTPUT s0, ram_stop_addr_PORT2
+                     ADD scratch_stop_REG, 01
+                     FETCH s0, (scratch_stop_REG)
+                     OUTPUT s0, ram_stop_addr_PORT3
+                     ADD scratch_stop_REG, 01
+                     FETCH s0, (scratch_stop_REG)
+                     OUTPUT s0, ram_stop_addr_PORT4
+                     SUB scratch_stop_REG, 03
+                     CALL prep_ram                       ; reset initials, latch addr
+                     CALL output_play_com
+                     LOAD paused_REG, 00
+                     JUMP menu
+              pause: DISABLE INTERRUPT
+                     CALL latch_pause_addr
+                     CALL set_ram_inactive
+                     INPUT s0, write_stop_addr_PORT1     ; store paused addr at FIXED loc
+                     STORE s0, 39
+                     INPUT s0, write_stop_addr_PORT2
+                     STORE s0, 3A
+                     INPUT s0, write_stop_addr_PORT3
+                     STORE s0, 3B
+                     INPUT s0, write_stop_addr_PORT4
+                     STORE s0, 3C
+                     LOAD paused_REG, 01                 ; set paused flag
+                     JUMP menu
+             record: DISABLE INTERRUPT
+                     COMPARE ram_c_REG, 02               ; if already in WRITE state, jump to stop
+                     JUMP Z, stop_rec
+                     COMPARE mem_full_REG, 01            ; if memory full, redirect
+                     JUMP Z, print_mem_full
+                     COMPARE rec_num_REG, 05             ; if already 5 recordings
+                     JUMP Z, print_mem_full
+                     COMPARE ram_c_REG, 80               ; otherwise, ram must be INACTIVE
+                     JUMP NZ, wait_for_int
+                     ADD rec_num_REG, 01                 ; inc recording count
+                     COMPARE rec_num_REG, 01
+                     LOAD s0, rec_num_REG
+                     LOAD s1, 00
+                     CALL NZ, calc_max_pointer
+                     LOAD scratch_start_REG, s1
+                     ADD s1, 04
+                     LOAD scratch_stop_REG, s1
+                     FETCH s0, 3D                        ; load address of next free mem location as START loc
+                     STORE s0, (scratch_start_REG)
+                     OUTPUT s0, ram_start_addr_PORT1
+                     ADD scratch_start_REG, 01
+                     FETCH s0, 3E
+                     STORE s0, (scratch_start_REG)
+                     OUTPUT s0, ram_start_addr_PORT2
+                     ADD scratch_start_REG, 01
+                     FETCH s0, 3F
+                     STORE s0, (scratch_start_REG)
+                     OUTPUT s0, ram_start_addr_PORT3
+                     ADD scratch_start_REG, 01
+                     FETCH s0, 40
+                     STORE s0, (scratch_start_REG)
+                     OUTPUT s0, ram_start_addr_PORT4
+                     SUB scratch_start_REG, 03
+                     CALL prep_ram                       ; reset initials, latch addr
+                     ; record scratch pad pointer in FIXED mem loc in scratch pad
+                     ; allows for movement through menu
+                     CALL output_rec_com
+                     JUMP menu                           ; update menu
+           stop_rec: DISABLE INTERRUPT
+                     CALL latch_pause_addr
+                     CALL set_ram_inactive
+                     COMPARE rec_num_REG, 01
+                     LOAD s0, rec_num_REG
+                     LOAD s1, 00
+                     CALL NZ, calc_max_pointer
+                     LOAD scratch_start_REG, s1
+                     ADD s1, 04
+                     LOAD scratch_stop_REG, s1
+                     INPUT s0, write_stop_addr_PORT1     ; store stop loc
+                     STORE s0, (scratch_stop_REG)
+                     ADD s0, 01                          ; inc addr
+                     STORE s0, 3D                        ; store in next free location FIXED addr
+                     ADD scratch_stop_REG, 01
+                     INPUT s0, write_stop_addr_PORT2
+                     STORE s0, (scratch_stop_REG)
+                     ADD s0, 01
+                     STORE s0, 3E
+                     ADD scratch_stop_REG, 01
+                     INPUT s0, write_stop_addr_PORT3
+                     STORE s0, (scratch_stop_REG)
+                     ADD s0, 01
+                     STORE s0, 3F
+                     ADD scratch_stop_REG, 01
+                     INPUT s0, write_stop_addr_PORT4
+                     STORE s0, (scratch_stop_REG)
+                     ADD s0, 01
+                     STORE s0, 40
+                     SUB scratch_stop_REG, 03
+                     COMPARE mem_full_REG, 01            ; if memory full, redirect
+                     JUMP Z, print_mem_full
+                     JUMP menu                           ; update menu
+           mem_full: DISABLE INTERRUPT
+                     LOAD int_c_REG, 00                  ; unload interrupt
+                     LOAD mem_full_REG, 01
+                     JUMP stop_rec
+        ram_op_done: DISABLE INTERRUPT
+                     CALL set_ram_inactive
+                     LOAD int_c_REG, 00                  ; unload interrupt
+                     JUMP menu
+           prep_ram: DISABLE INTERRUPT                   ; load addr to ram, reset initials
+                     CALL res_latch_ram
+                     CALL delay_10us
+                     CALL set_ram_inactive
+                     RETURN 
+          inc_state: DISABLE INTERRUPT
+                     COMPARE state_REG, 05
+                     JUMP Z, menu
+                     COMPARE state_REG, 06
+                     JUMP Z, menu
+                     ADD state_REG, 01
+                     JUMP menu
+          dec_state: DISABLE INTERRUPT
+                     SUB state_REG, 01
+                     JUMP menu
+    output_play_com: LOAD ram_c_REG, 01                  ; send play command
+                     OUTPUT ram_c_REG, ram_com_PORT
+                     RETURN 
+     output_rec_com: LOAD ram_c_REG, 02                  ; send record command
+                     OUTPUT ram_c_REG, ram_com_PORT
+                     RETURN 
+     output_del_com: LOAD ram_c_REG, 04                  ; send addr-controlled delete command
+                     OUTPUT ram_c_REG, ram_com_PORT
+                     RETURN 
+ output_del_all_com: LOAD ram_c_REG, 08                  ; send delete all command
+                     OUTPUT ram_c_REG, ram_com_PORT
+                     RETURN 
+      output_ff_com: LOAD ram_c_REG, 10                  ; send FF command
+                     OUTPUT ram_c_REG, ram_com_PORT
+                     RETURN 
+   latch_pause_addr: LOAD ram_c_REG, 20                  ; latch write stop addr
+                     OUTPUT ram_c_REG, ram_com_PORT
+                     RETURN 
+      res_latch_ram: LOAD ram_c_REG, 40                  ; latch addr, reset initials
+                     OUTPUT ram_c_REG, ram_com_PORT
+                     RETURN 
+   set_ram_inactive: LOAD ram_c_REG, 80                  ; inactive
+                     OUTPUT ram_c_REG, ram_com_PORT
+                     RETURN 
+        reset_flags: DISABLE INTERRUPT
+                     LOAD s0, 01
+                     COMPARE s0, 00
+                     RETURN 
+          print_del: DISABLE INTERRUPT
+                     CALL clear_display
+                     LOAD char_REG, 20                   ;spaces
+                     CALL write_char
+                     LOAD char_REG, 20
+                     CALL write_char
+                     LOAD char_REG, 20
+                     CALL write_char
+                     LOAD char_REG, 20
+                     CALL write_char
+                     LOAD char_REG, 20
+                     CALL write_char
+                     LOAD char_REG, 44                   ; print "DELETE"
+                     CALL write_char
+                     LOAD char_REG, 45
+                     CALL write_char
+                     LOAD char_REG, 4C
+                     CALL write_char
+                     LOAD char_REG, 45
+                     CALL write_char
+                     LOAD char_REG, 54
+                     CALL write_char
+                     LOAD char_REG, 45
+                     CALL write_char
+                     JUMP wait_for_int
+     print_mem_full: DISABLE INTERRUPT
+                     CALL clear_display
+                     LOAD char_REG, 20                   ; spaces
+                     CALL write_char
+                     LOAD char_REG, 20
+                     CALL write_char
+                     LOAD char_REG, 4D
+                     CALL write_char
+                     LOAD char_REG, 45
+                     CALL write_char
+                     LOAD char_REG, 4D
+                     CALL write_char
+                     LOAD char_REG, 4F
+                     CALL write_char
+                     LOAD char_REG, 52
+                     CALL write_char
+                     LOAD char_REG, 59
+                     CALL write_char
+                     LOAD char_REG, 20
+                     CALL write_char
+                     LOAD char_REG, 46
+                     CALL write_char
+                     LOAD char_REG, 55
+                     CALL write_char
+                     LOAD char_REG, 4C
+                     CALL write_char
+                     LOAD char_REG, 4C
+                     CALL write_char
+                     LOAD char_REG, 21
+                     CALL write_char
+                     JUMP wait_for_int
+       print_volume: DISABLE INTERRUPT
+                     CALL clear_display                  ; clear display
+                     LOAD char_REG, 56                   ; print "VOL: "
+                     CALL write_char
+                     LOAD char_REG, 4F
+                     CALL write_char
+                     LOAD char_REG, 4C
+                     CALL write_char
+                     LOAD char_REG, 3A
+                     CALL write_char
+                     LOAD char_REG, 20
+                     CALL write_char
+                     LOAD s0, volume_REG
+                     JUMP print_v_meter                  ; print volume bars
+      print_v_meter: DISABLE INTERRUPT
+                     COMPARE s0, 00                      ; if s0 == 0, done
+                     JUMP Z, wait_for_int
+                     LOAD char_REG, FF                   ; print box
+                     CALL write_char
+                     SUB s0, 02                          ; decrease s0
+                     JUMP print_v_meter                  ; repeat
+      print_del_all: DISABLE INTERRUPT
+                     CALL clear_display
+                     LOAD char_REG, 20                   ; spaces
+                     CALL write_char
+                     LOAD char_REG, 20
+                     CALL write_char
+                     LOAD char_REG, 20
+                     CALL write_char
+                     LOAD char_REG, 44
+                     CALL write_char
+                     LOAD char_REG, 45
+                     CALL write_char
+                     LOAD char_REG, 4C
+                     CALL write_char
+                     LOAD char_REG, 45
+                     CALL write_char
+                     LOAD char_REG, 54
+                     CALL write_char
+                     LOAD char_REG, 45
+                     CALL write_char
+                     LOAD char_REG, 20
+                     CALL write_char
+                     LOAD char_REG, 41
+                     CALL write_char
+                     LOAD char_REG, 4C
+                     CALL write_char
+                     LOAD char_REG, 4C
+                     CALL write_char
+                     JUMP wait_for_int
+        print_empty: DISABLE INTERRUPT
+                     CALL clear_display
+                     LOAD char_REG, 20                   ; spaces
+                     CALL write_char
+                     LOAD char_REG, 20
+                     CALL write_char
+                     LOAD char_REG, 20
+                     CALL write_char
+                     LOAD char_REG, 20
+                     CALL write_char
+                     LOAD char_REG, 20
+                     CALL write_char
+                     LOAD char_REG, 45                   ; print "EMPTY"
+                     CALL write_char
+                     LOAD char_REG, 4D
+                     CALL write_char
+                     LOAD char_REG, 50
+                     CALL write_char
+                     LOAD char_REG, 54
+                     CALL write_char
+                     LOAD char_REG, 59
+                     CALL write_char
+                     LOAD char_REG, 21
+                     CALL write_char
+                     JUMP wait_for_int
+     print_messages: DISABLE INTERRUPT
+                     COMPARE rec_num_REG, 00
+                     JUMP Z, print_empty
+                     CALL clear_display                  ; clear display
+                     LOAD char_REG, 20                   ; spaces
+                     CALL write_char
+                     LOAD char_REG, 20
+                     CALL write_char
+                     LOAD char_REG, 4D
+                     CALL write_char
+                     LOAD char_REG, 45
+                     CALL write_char
+                     LOAD char_REG, 53
+                     CALL write_char
+                     LOAD char_REG, 53
+                     CALL write_char
+                     LOAD char_REG, 41
+                     CALL write_char
+                     LOAD char_REG, 47
+                     CALL write_char
+                     LOAD char_REG, 45
+                     CALL write_char
+                     LOAD char_REG, 20
+                     CALL write_char
+                     COMPARE scratch_start_REG, 00
+                     JUMP Z, print_one
+                     COMPARE scratch_start_REG, 08
+                     JUMP Z, print_two
+                     COMPARE scratch_start_REG, 10
+                     JUMP Z, print_three
+                     COMPARE scratch_start_REG, 18
+                     JUMP Z, print_four
+                     COMPARE scratch_start_REG, 20
+                     JUMP Z, print_five
+                     LOAD char_REG, F4                   ; if omega prints, something went wrong
+                     CALL write_char
+                     JUMP wait_for_int
+          print_one: DISABLE INTERRUPT
+                     LOAD char_REG, 31
+                     CALL write_char
+                     LOAD char_REG, 20
+                     CALL write_char
+                     JUMP print_indic
+          print_two: DISABLE INTERRUPT
+                     LOAD char_REG, 32
+                     CALL write_char
+                     LOAD char_REG, 20
+                     CALL write_char
+                     JUMP print_indic
+        print_three: DISABLE INTERRUPT
+                     LOAD char_REG, 33
+                     CALL write_char
+                     LOAD char_REG, 20
+                     CALL write_char
+                     JUMP print_indic
+         print_four: DISABLE INTERRUPT
+                     LOAD char_REG, 34
+                     CALL write_char
+                     LOAD char_REG, 20
+                     CALL write_char
+                     JUMP print_indic
+         print_five: DISABLE INTERRUPT
+                     LOAD char_REG, 35
+                     CALL write_char
+                     LOAD char_REG, 20
+                     CALL write_char
+                     JUMP print_indic
+         print_play: DISABLE INTERRUPT
+                     CALL clear_display                  ; clear display
+                     LOAD char_REG, 20                   ; spaces
+                     CALL write_char
+                     LOAD char_REG, 20
+                     CALL write_char
+                     LOAD char_REG, 20
+                     CALL write_char
+                     LOAD char_REG, 20
+                     CALL write_char
+                     LOAD char_REG, 20
+                     CALL write_char
+                     LOAD char_REG, 20
+                     CALL write_char
+                     LOAD char_REG, 50                   ; print "PLAY"
+                     CALL write_char
+                     LOAD char_REG, 4C
+                     CALL write_char
+                     LOAD char_REG, 41
+                     CALL write_char
+                     LOAD char_REG, 59
+                     CALL write_char
+                     JUMP wait_for_int
+       print_record: DISABLE INTERRUPT
+                     CALL clear_display                  ; clear display
+                     LOAD char_REG, 20                   ; spaces
+                     CALL write_char
+                     LOAD char_REG, 20
+                     CALL write_char
+                     LOAD char_REG, 20
+                     CALL write_char
+                     LOAD char_REG, 20
+                     CALL write_char
+                     LOAD char_REG, 52                   ; print "RECORD"
+                     CALL write_char
+                     LOAD char_REG, 45
+                     CALL write_char
+                     LOAD char_REG, 43
+                     CALL write_char
+                     LOAD char_REG, 4F
+                     CALL write_char
+                     LOAD char_REG, 52
+                     CALL write_char
+                     LOAD char_REG, 44
+                     CALL write_char
+                     COMPARE ram_c_REG, 02               ; check if ram recording
+                     JUMP Z, print_box
+                     JUMP print_blank
+        print_indic: COMPARE ram_c_REG, 01               ; check if ram recording
+                     JUMP Z, print_box
+                     COMPARE ram_c_REG, 10               ; if ffing
+                     JUMP Z, print_arrow
+                     JUMP print_blank
+          print_box: LOAD char_REG, 20                   ; print a space and box
+                     CALL write_char
+                     LOAD char_REG, FF
+                     CALL write_char
+                     JUMP wait_for_int
+        print_blank: LOAD char_REG, 20                   ; print a space and empty
+                     CALL write_char
+                     LOAD char_REG, DB
+                     CALL write_char
+                     JUMP wait_for_int
+        print_arrow: LOAD char_REG, 20                   ; print a space and arrow
+                     CALL write_char
+                     LOAD char_REG, 7E
+                     CALL write_char
+                     JUMP wait_for_int
+     print_deleting: CALL clear_display                  ; print "DELETE"
+                     LOAD char_REG, 20                   ; spaces
+                     CALL write_char
+                     LOAD char_REG, 20
+                     CALL write_char
+                     LOAD char_REG, 44                   ; print "DELETING"
+                     CALL write_char
+                     LOAD char_REG, 45
+                     CALL write_char
+                     LOAD char_REG, 4C
+                     CALL write_char
+                     LOAD char_REG, 45
+                     CALL write_char
+                     LOAD char_REG, 54
+                     CALL write_char
+                     LOAD char_REG, 49
+                     CALL write_char
+                     LOAD char_REG, 4E
+                     CALL write_char
+                     LOAD char_REG, 47
+                     CALL write_char
+                     CALL delay_10ms                     ; delay 10ms between periods for flare
+                     CALL delay_10ms
+                     CALL delay_10ms
+                     LOAD char_REG, 2E
+                     CALL write_char
+                     CALL delay_10ms
+                     CALL delay_10ms
+                     CALL delay_10ms
+                     LOAD char_REG, 2E
+                     CALL write_char
+                     CALL delay_10ms
+                     CALL delay_10ms
+                     CALL delay_10ms
+                     LOAD char_REG, 2E
+                     CALL write_char
+                     CALL delay_10ms
+                     CALL delay_10ms
+                     CALL delay_10ms
+                     LOAD char_REG, 2E
+                     CALL write_char
+                     RETURN 
+         write_char: DISABLE INTERRUPT
+                     LOAD lcd_c_REG, 05
+                     OUTPUT char_REG, lcd_data_PORT
+                     OUTPUT lcd_c_REG, lcd_com_PORT
+                     CALL delay_2us
+                     LOAD lcd_c_REG, 00
+                     OUTPUT lcd_c_REG, lcd_com_PORT
+                     CALL delay_char
+                     RETURN 
+      clear_display: DISABLE INTERRUPT                   ;
+                     LOAD lcd_d_REG, 01                  ;
+                     LOAD lcd_c_REG, 04                  ;
+                     OUTPUT lcd_d_REG, lcd_data_PORT     ; output char FIRST
+                     OUTPUT lcd_c_REG, lcd_com_PORT      ; command controls lcd control logic
+                     LOAD lcd_c_REG, 00                  ;
+                     CALL delay_2us                      ; give controller time to deconstruct to 4-bit
+                     OUTPUT lcd_c_REG, lcd_com_PORT      ;
+                     CALL delay_clear                    ;
+                     CALL res_ram_loc_top                ;
+                     RETURN                              ;
+    res_ram_loc_top: DISABLE INTERRUPT
+                     LOAD lcd_d_REG, 80
+                     LOAD lcd_c_REG, 04
+                     OUTPUT lcd_d_REG, lcd_data_PORT
+                     OUTPUT lcd_c_REG, lcd_com_PORT
+                     LOAD lcd_c_REG, 00
+                     CALL delay_2us
+                     OUTPUT lcd_c_REG, lcd_com_PORT
+                     CALL delay_clear
+                     RETURN 
+    res_ram_loc_bot: DISABLE INTERRUPT
+                     LOAD lcd_d_REG, C0
+                     LOAD lcd_c_REG, 04
+                     OUTPUT lcd_d_REG, lcd_data_PORT
+                     OUTPUT lcd_c_REG, lcd_com_PORT
+                     LOAD lcd_c_REG, 00
+                     CALL delay_2us
+                     OUTPUT lcd_c_REG, lcd_com_PORT
+                     CALL delay_clear
+                     RETURN 
+         delay_char: CALL delay_1ms                      ; at least 2.6ms delay after character write
+                     CALL delay_1ms                      ;
+                     CALL delay_p6ms                     ;
+                     RETURN                              ;
+        delay_clear: CALL delay_1ms                      ; at least 1.64ms delay after clearing LCD
+                     CALL delay_p6ms                     ;
+                     CALL delay_40us
+                     RETURN                              ;
+          delay_1us: LOAD s0, s0                         ; no op command (2 cycles)
+                     LOAD s0, s0                         ; @ 37.5 MHz / cycle
+                     LOAD s0, s0                         ; = 0.0533334 us
+                     LOAD s0, s0                         ; x 19
+                     LOAD s0, s0                         ; = ~1us
+                     LOAD s0, s0                         ; 1.0133346 us (ACTUAL TIME)
+                     LOAD s0, s0                         ; 7
+                     LOAD s0, s0                         ; 8
+                     LOAD s0, s0                         ; 9
+                     LOAD s0, s0                         ; 10
+                     LOAD s0, s0                         ; 11
+                     LOAD s0, s0                         ; 12
+                     LOAD s0, s0                         ; 13
+                     LOAD s0, s0                         ; 14
+                     LOAD s0, s0                         ; 15
+                     LOAD s0, s0                         ; 16
+                     LOAD s0, s0                         ; 17
+                     LOAD s0, s0                         ; 18
+                     RETURN                              ; 19 (all instructions 2 cycles)
+          delay_2us: CALL delay_1us
+                     CALL delay_1us
+                     RETURN 
+         delay_10us: CALL delay_1us                      ; ignoring the time for each CALL instruction
+                     CALL delay_1us                      ; 1.0133346 us
+                     CALL delay_1us                      ; x 10
+                     CALL delay_1us                      ; = 10.133346 us
+                     CALL delay_1us                      ;
+                     CALL delay_1us                      ; 10 CALL instructions + 1 RET instruction
+                     CALL delay_1us                      ; (0.0533334 us) * 11
+                     CALL delay_1us                      ; = 0.5866674 us
+                     CALL delay_1us                      ; 10.133346 us + 0.5866674 us
+                     CALL delay_1us                      ; 10.7200134 (ACTUAL TIME)
+                     RETURN                              ; better over than under time
+         delay_40us: CALL delay_10us                     ;
+                     CALL delay_10us                     ; 10.7200134 us * 4
+                     CALL delay_10us                     ; = 42.8800536 us
+                     CALL delay_10us                     ; its ok to delay longer
+                     RETURN 
+         delay_p6ms: CALL delay_40us                     ; 42.8800536 us
+                     CALL delay_40us                     ; * 14
+                     CALL delay_40us                     ; = 600.3207 us
+                     CALL delay_40us                     ; = 0.600321 ms
+                     CALL delay_40us                     ; 5
+                     CALL delay_40us                     ;
+                     CALL delay_40us                     ;
+                     CALL delay_40us                     ;
+                     CALL delay_40us                     ;
+                     CALL delay_40us                     ; 10
+                     CALL delay_40us                     ;
+                     CALL delay_40us                     ;
+                     CALL delay_40us                     ;
+                     CALL delay_40us                     ; 14
+                     RETURN 
+          delay_1ms: CALL delay_40us                     ; 42.8800536 us
+                     CALL delay_40us                     ; * 25
+                     CALL delay_40us                     ; = 1029.121 us
+                     CALL delay_40us                     ; = 1.029121 ms
+                     CALL delay_40us                     ; 5
+                     CALL delay_40us                     ;
+                     CALL delay_40us                     ;
+                     CALL delay_40us                     ;
+                     CALL delay_40us                     ;
+                     CALL delay_40us                     ; 10
+                     CALL delay_40us                     ;
+                     CALL delay_40us                     ;
+                     CALL delay_40us                     ;
+                     CALL delay_40us                     ;
+                     CALL delay_40us                     ; 15
+                     CALL delay_40us                     ;
+                     CALL delay_40us                     ;
+                     CALL delay_40us                     ;
+                     CALL delay_40us                     ;
+                     CALL delay_40us                     ; 20
+                     CALL delay_40us                     ;
+                     CALL delay_40us                     ;
+                     CALL delay_40us                     ;
+                     CALL delay_40us                     ;
+                     CALL delay_40us                     ; 25
+                     RETURN                              ; CALL and RET instruction delay negligible
+         delay_10ms: CALL delay_1ms
+                     CALL delay_1ms
+                     CALL delay_1ms
+                     CALL delay_1ms
+                     CALL delay_1ms
+                     CALL delay_1ms
+                     CALL delay_1ms
+                     CALL delay_1ms
+                     CALL delay_1ms
+                     CALL delay_1ms
+                     RETURN 
+                ISR: INPUT int_c_REG, 00
+                     RETURNI DISABLE
+                     ADDRESS FFF                         ; interrupt vector is located at highest instruction address (4k instructions)
+                     JUMP ISR
+                     ;================================================================
+                     ;
+                     ;================================================================
